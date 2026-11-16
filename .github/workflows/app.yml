@@ -14,6 +14,7 @@ jobs:
           distribution: temurin
           java-version: 17
       - name: Build
+        id: build
         env:
           KEYSTORE_B64: ${{ secrets.KEYSTORE_B64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
@@ -28,6 +29,10 @@ jobs:
           echo "Using: $ZIP"
           rm -rf work && mkdir work && unzip -q "$ZIP" -d work
           cd work/Phonebook
+          # channel.txt inside the zip: "beta" = test copy (separate app), anything else = release to everyone
+          CHANNEL=$(tr -d '[:space:]' < channel.txt 2>/dev/null || echo stable)
+          echo "Channel: $CHANNEL"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
           echo "sdk.dir=$ANDROID_HOME" > local.properties
           chmod +x gradlew
           EXTRA=""
@@ -35,18 +40,34 @@ jobs:
             echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/upload.jks"
             EXTRA="-PuploadKeystore=$RUNNER_TEMP/upload.jks"
           fi
-          ./gradlew bundleRelease assembleRelease --no-daemon -PversionCode=$((100 + ${{ github.run_number }})) $EXTRA
-          cp app/build/outputs/bundle/release/app-release.aab "$GITHUB_WORKSPACE/phonebook.aab"
-          cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/phonebook.apk"
-          cp PRIVACY.md "$GITHUB_WORKSPACE/PRIVACY.md"
-      - name: Publish
+          VC=$((100 + ${{ github.run_number }}))
+          if [ "$CHANNEL" = "beta" ]; then
+            ./gradlew assembleRelease --no-daemon -PversionCode=$VC -Pbeta=true $EXTRA
+            cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/phonebook-beta.apk"
+          else
+            ./gradlew bundleRelease assembleRelease --no-daemon -PversionCode=$VC $EXTRA
+            cp app/build/outputs/bundle/release/app-release.aab "$GITHUB_WORKSPACE/phonebook.aab"
+            cp app/build/outputs/apk/release/app-release.apk "$GITHUB_WORKSPACE/phonebook.apk"
+            cp PRIVACY.md "$GITHUB_WORKSPACE/PRIVACY.md" || true
+          fi
+      - name: Publish test copy
+        if: steps.build.outputs.channel == 'beta'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete beta --yes --cleanup-tag --repo ${{ github.repository }} || true
+          gh release create beta phonebook-beta.apk --prerelease --repo ${{ github.repository }} --title "Phonebook ${{ github.run_number }} (beta)" --notes "Test build ${{ github.run_number }}"
+      - name: Publish to everyone
+        if: steps.build.outputs.channel != 'beta'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete app --yes --cleanup-tag --repo ${{ github.repository }} || true
           gh release create app phonebook.apk phonebook.aab --repo ${{ github.repository }} --title "Phonebook ${{ github.run_number }}" --notes "Build ${{ github.run_number }}"
       - name: Privacy policy page
+        if: steps.build.outputs.channel != 'beta'
         run: |
+          [ -f PRIVACY.md ] || exit 0
           git config user.name "github-actions"
           git config user.email "github-actions@users.noreply.github.com"
           git add PRIVACY.md
